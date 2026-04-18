@@ -249,12 +249,21 @@ async function saveMastersToServer(drugsText, vendorsText){
   await loadMastersFromServer();
 }
 function loadMasters(){ return { drugs: MASTERS.drugs, vendors: MASTERS.vendors }; }
-function matchDrug(extracted, drugs){
-  const n = normalize(extracted); if(!n) return null;
-  let hit = drugs.find(d => normalize(d) === n);
-  if (hit) return hit;
-  hit = drugs.find(d => { const nd = normalize(d); return nd && (n.includes(nd) || nd.includes(n)); });
-  return hit || null;
+// Search master drug list for any entry whose normalized name CONTAINS
+// the substring "VendorCode-ExtractedName". Requires a vendor code.
+function matchDrug(extracted, vendorCode, drugs){
+  const name = (extracted||'').trim();
+  const code = (vendorCode||'').trim();
+  if (!name || !code || code === 'VXX') return null;
+  const key = normalize(`${code}-${name}`);
+  if (!key) return null;
+  return drugs.find(d => normalize(d).includes(key)) || null;
+}
+function sellingPrice(purchasePrice, mrp){
+  const p = parseFloat(purchasePrice);
+  const m = parseFloat(mrp);
+  if (isNaN(p) || isNaN(m)) return '';
+  return (p + (m - p) * 0.7).toFixed(2);
 }
 function matchVendor(extracted, vendors){
   const n = normalize(extracted); if(!n) return null;
@@ -523,6 +532,7 @@ function parseJsonLoose(s){
 
 /* ---------- vendor resolution ---------- */
 $('#billVendorName').oninput = resolveVendor;
+$('#billVendorCode').oninput = () => renderRows();
 function resolveVendor(){
   const { vendors } = loadMasters();
   const name = $('#billVendorName').value.trim();
@@ -555,14 +565,14 @@ function renderRows(){
   const tbody = $('#rows'); tbody.innerHTML = '';
   state.rows.forEach((r, i) => {
     const tr = document.createElement('tr'); tr.className = 'border-b border-slate-100';
-    const matched = matchDrug(r.name, drugs);
+    const matched = matchDrug(r.name, code, drugs);
     if (matched) tr.classList.add('matched-row'); else tr.classList.add('new-vendor-row');
     tr.innerHTML = `
       <td class="px-2 py-1 text-center text-slate-400"><button class="delRow hover:text-rose-600" data-i="${i}">✕</button></td>
       <td class="px-2 py-1" title="${matched ? 'matched master: '+matched : 'no master match'}">
         <input data-f="name" data-i="${i}" value="${escapeHtml(r.name)}" />
         <div class="text-[10px] ${matched?'text-emerald-700':'text-amber-700'} px-2 pb-1">
-          ${matched ? '→ master: '+matched : `→ will export as: <b>${escapeHtml(code)} - ${escapeHtml(r.name||'')} - ${escapeHtml(r.batch_number||'')}</b>`}
+          ${matched ? '→ master: '+matched : `→ will export as: <b>${escapeHtml(code)} - ${escapeHtml(r.name||'')} - ${escapeHtml(r.batch_number||'')}</b> <i>(added to master on Download)</i>`}
         </div>
       </td>
       <td class="px-2 py-1"><input data-f="type" data-i="${i}" value="${escapeHtml(r.type)}" /></td>
@@ -587,7 +597,7 @@ function escapeHtml(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c => (
 $('#btnAddRow').onclick = () => { state.rows.push({name:'',type:'',packing:'',quantity:'',purchase_price:'',gst_percent:'',mrp:'',batch_number:'',expiry_date:''}); renderRows(); };
 
 /* ---------- CSV download ---------- */
-$('#btnDownload').onclick = () => {
+$('#btnDownload').onclick = async () => {
   const { drugs } = loadMasters();
   const invoiceNumber = $('#billInvoiceNumber').value.trim();
   const vendorCode = $('#billVendorCode').value.trim() || 'VXX';
@@ -597,12 +607,29 @@ $('#btnDownload').onclick = () => {
   if (!invoiceNumber) { if (!confirm('Invoice Number is empty. Export anyway?')) return; }
   if (!vendorCode || vendorCode === 'VXX') { if (!confirm('Vendor code is not set. Export anyway? (Names will use "VXX" as vendor code prefix.)')) return; }
 
-  const header = ['Invoice Number','Name','Type','Packing','Quantity','Purchase Price','GST %','MRP','Batch Number','Purchase Date','Expiry Date','Vendor Name'];
+  const header = ['Invoice Number','Name','Type','Packing','Quantity','Purchase Price','GST %','MRP','Selling Price','Batch Number','Purchase Date','Expiry Date','Vendor Name'];
+  const newDrugEntries = [];
   const rows = state.rows.map(r => {
-    const matched = matchDrug(r.name, drugs);
+    const matched = matchDrug(r.name, vendorCode, drugs);
     const finalName = matched ? matched : `${vendorCode} - ${r.name||''} - ${r.batch_number||''}`;
-    return [invoiceNumber, finalName, r.type||'', r.packing||'', r.quantity||'', r.purchase_price||'', r.gst_percent||'', r.mrp||'', r.batch_number||'', purchaseDate, normalizeDate(r.expiry_date||''), vendorName];
+    if (!matched && r.name) newDrugEntries.push(finalName);
+    return [invoiceNumber, finalName, r.type||'', r.packing||'', r.quantity||'', r.purchase_price||'', r.gst_percent||'', r.mrp||'', sellingPrice(r.purchase_price, r.mrp), r.batch_number||'', purchaseDate, normalizeDate(r.expiry_date||''), vendorName];
   });
+
+  // Save newly-created drug names to the master list (team-wide)
+  const uniqueNew = [...new Set(newDrugEntries)];
+  if (uniqueNew.length > 0) {
+    try {
+      const cur = (MASTERS.drugsRaw || '').trim();
+      const updated = cur ? cur + '\n' + uniqueNew.join('\n') : uniqueNew.join('\n');
+      await saveMastersToServer(updated, MASTERS.vendorsRaw || '');
+      $('#status').innerHTML = `<span class="text-emerald-700">✓ Added ${uniqueNew.length} new drug ${uniqueNew.length===1?'name':'names'} to the team master list.</span>`;
+    } catch(e){
+      console.error('Failed to save new drug entries:', e);
+      $('#status').innerHTML = `<span class="text-amber-700">⚠ CSV downloaded, but failed to save new drug names to master: ${e.message}</span>`;
+    }
+  }
+
   const csv = [header, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
