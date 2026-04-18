@@ -425,13 +425,27 @@ Rules:
 - Quantity: the number of PACKS bought (not total tablets).
 - Output JSON only.`;
 
+const IMAGE_OCR_ADDENDUM = `
+
+SPECIAL OCR GUIDANCE — this is a scanned or photographed bill, not a text PDF:
+- Read each character carefully. Common OCR confusions in pharma bills: 0 vs O, 1 vs l vs I, 5 vs S, 8 vs B, 2 vs Z.
+- Batch numbers and expiry dates are often printed in small/faint/slanted text — inspect each character.
+- Product names may wrap to a second line in the table; combine continued text into a single name.
+- Use column headers as anchors if rows are slightly misaligned from scanning.
+- Sanity-check arithmetic when possible: purchase_price × quantity should approximately match the line total printed on the bill.
+- If a cell is illegible, smudged, or partially cut off, return "" for that field. Do NOT invent characters.
+- Do not skip any row that has a product name — even if parts are unclear, capture what you can read.`;
+
 async function callBackend(contentBlocks){
   const pwd = localStorage.getItem(LS.teamPwd) || '';
-  const model = localStorage.getItem(LS.model) || 'claude-sonnet-4-5-20250929';
+  const defaultModel = localStorage.getItem(LS.model) || 'claude-sonnet-4-5-20250929';
+  // For scans/photos, Opus has dramatically better OCR. Auto-upgrade unless user has already picked Opus.
+  const useOpusForImage = state.fileKind === 'image' && !defaultModel.includes('opus');
+  const model = useOpusForImage ? 'claude-opus-4-5-20250929' : defaultModel;
   const res = await fetch('/api/extract', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-team-password': pwd },
-    body: JSON.stringify({ model, max_tokens: 4096, messages: [{ role: 'user', content: contentBlocks }] }),
+    body: JSON.stringify({ model, max_tokens: 4096, temperature: 0, messages: [{ role: 'user', content: contentBlocks }] }),
   });
   if (!res.ok) {
     const t = await res.text();
@@ -467,14 +481,14 @@ $('#btnExtract').onclick = async () => {
       const mt = state.file.type || 'image/png';
       blocks = [
         { type: 'image', source: { type: 'base64', media_type: mt, data: b64 } },
-        { type: 'text', text: EXTRACTION_PROMPT },
+        { type: 'text', text: EXTRACTION_PROMPT + IMAGE_OCR_ADDENDUM },
       ];
     } else if (state.fileKind === 'excel' || state.fileKind === 'csv') {
       const text = state.fileKind === 'csv' ? await state.file.text() : await excelToText(state.file);
       blocks = [{ type: 'text', text: EXTRACTION_PROMPT + '\n\nBill contents (spreadsheet):\n```\n' + text + '\n```' }];
     } else { throw new Error('Unsupported file type.'); }
 
-    $('#status').innerHTML = '<span class="spin"></span>Extracting line items...';
+    $('#status').innerHTML = '<span class="spin"></span>Extracting line items...' + (state.fileKind === 'image' ? ' (using Opus for scan/photo — may take 20–40s)' : '');
     const raw = await callBackend(blocks);
     const json = parseJsonLoose(raw);
     if (!json || !Array.isArray(json.items)) throw new Error('Could not parse JSON from model response.');
