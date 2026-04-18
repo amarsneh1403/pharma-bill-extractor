@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pharma Bill → CSV Extractor</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+  .chip { display:inline-flex; align-items:center; padding:2px 8px; border-radius:9999px; font-size:11px; font-weight:600; }
+  .table-scroll { max-height: 520px; overflow: auto; }
+  table input { width: 100%; background: transparent; border: none; padding: 6px 8px; font-size: 12px; }
+  table input:focus { outline: 2px solid #6366f1; background: white; border-radius: 4px; }
+  .new-vendor-row { background-color: #fff7ed !important; }
+  .matched-row { background-color: #f0fdf4; }
+  .warn-row { background-color: #fef2f2; }
+  .tab-btn[aria-selected="true"] { background: #4f46e5; color: white; }
+  .spin { display:inline-block; width:16px; height:16px; border-radius:50%; border:2px solid #c7d2fe; border-top-color:#4f46e5; animation: sp 1s linear infinite; vertical-align: -3px; margin-right:8px;}
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+
+<header class="bg-white border-b border-slate-200">
+  <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-xl font-bold">Pharma Bill → CSV Extractor</h1>
+      <p class="text-xs text-slate-500">Upload a vendor bill (PDF, image, or Excel). Extract line items → review → export CSV.</p>
+    </div>
+    <div class="flex gap-2">
+      <button id="btnSettings" class="px-3 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-md">⚙ Settings</button>
+      <button id="btnMasters" class="px-3 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-md">📚 Master Lists</button>
+    </div>
+  </div>
+</header>
+
+<!-- First-run password gate -->
+<div id="gate" class="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4 hidden">
+  <div class="bg-white rounded-xl max-w-md w-full p-6">
+    <h3 class="font-semibold text-lg">Team access</h3>
+    <p class="text-sm text-slate-500 mt-1">Enter the team password to use this tool. Ask your admin if you don't have it.</p>
+    <input id="gatePwd" type="password" class="mt-4 w-full border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="Team password" />
+    <p id="gateErr" class="text-xs text-rose-600 mt-2 hidden">Incorrect password. Try again.</p>
+    <button id="gateBtn" class="mt-4 w-full px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-sm font-medium">Continue</button>
+    <p class="text-xs text-slate-400 mt-3">Your password is remembered in this browser so you only enter it once per device.</p>
+  </div>
+</div>
+
+<main class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+
+  <!-- Upload -->
+  <section class="bg-white border border-slate-200 rounded-xl p-6">
+    <h2 class="font-semibold mb-3">1 · Upload bill</h2>
+    <div id="drop" class="border-2 border-dashed border-slate-300 rounded-lg p-8 text-center hover:border-indigo-400 transition">
+      <input id="fileInput" type="file" class="hidden" accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.csv" />
+      <p class="text-sm text-slate-600">Drag &amp; drop a bill file here, or
+        <button id="btnBrowse" class="text-indigo-600 font-medium hover:underline">browse</button>
+      </p>
+      <p class="text-xs text-slate-400 mt-1">Supported: PDF, PNG/JPG/WEBP image, XLSX/XLS, CSV. Max ~4 MB.</p>
+      <div id="fileInfo" class="mt-3 text-sm text-slate-700 hidden"></div>
+    </div>
+    <div class="mt-4 flex flex-wrap gap-3 items-center">
+      <button id="btnExtract" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-sm font-medium disabled:opacity-50" disabled>Extract line items</button>
+      <span id="status" class="text-sm text-slate-500"></span>
+    </div>
+  </section>
+
+  <!-- Bill-level info -->
+  <section id="billMetaSec" class="bg-white border border-slate-200 rounded-xl p-6 hidden">
+    <h2 class="font-semibold mb-3">2 · Bill details</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <label class="block">
+        <span class="text-xs text-slate-500">Invoice Number</span>
+        <input id="billInvoiceNumber" class="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="auto-filled from bill" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-500">Purchase Date (dd/MM/yyyy)</span>
+        <input id="billPurchaseDate" class="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="dd/MM/yyyy" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-500">Vendor Name (from bill)</span>
+        <input id="billVendorName" class="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-500">Vendor Code (resolved)</span>
+        <div class="flex gap-2 mt-1">
+          <input id="billVendorCode" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="auto-filled if vendor exists" />
+          <button id="btnAddVendor" class="px-2 py-1 text-xs bg-amber-500 text-white rounded-md hover:bg-amber-600 whitespace-nowrap">+ Save new</button>
+        </div>
+        <span id="vendorStatus" class="text-xs"></span>
+      </label>
+    </div>
+  </section>
+
+  <!-- Review table -->
+  <section id="reviewSec" class="bg-white border border-slate-200 rounded-xl p-6 hidden">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold">3 · Review &amp; edit line items</h2>
+      <div class="flex gap-2">
+        <button id="btnAddRow" class="px-3 py-1.5 text-sm bg-slate-100 hover:bg-slate-200 rounded-md">+ Add row</button>
+        <button id="btnDownload" class="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-md font-medium">⬇ Download CSV</button>
+      </div>
+    </div>
+    <div class="flex gap-3 text-xs mb-2">
+      <span class="chip bg-emerald-100 text-emerald-700">matched drug</span>
+      <span class="chip bg-amber-100 text-amber-800">unmatched → will use code format</span>
+    </div>
+    <div class="table-scroll border border-slate-200 rounded-md">
+      <table class="min-w-full text-xs">
+        <thead class="bg-slate-100 sticky top-0">
+          <tr class="text-slate-600 text-left">
+            <th class="px-2 py-2 w-6"></th>
+            <th class="px-2 py-2">Name</th>
+            <th class="px-2 py-2">Type</th>
+            <th class="px-2 py-2">Packing</th>
+            <th class="px-2 py-2">Quantity</th>
+            <th class="px-2 py-2">Purchase Price</th>
+            <th class="px-2 py-2">GST %</th>
+            <th class="px-2 py-2">MRP</th>
+            <th class="px-2 py-2">Batch No</th>
+            <th class="px-2 py-2">Expiry (dd/MM/yyyy)</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<!-- Settings modal -->
+<div id="settingsModal" class="fixed inset-0 bg-black/40 hidden items-center justify-center z-50 p-4">
+  <div class="bg-white rounded-xl max-w-lg w-full p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="font-semibold">Settings</h3>
+      <button class="closeModal text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
+    </div>
+    <label class="block text-sm">
+      <span class="text-slate-600">Team password</span>
+      <input id="teamPwd" type="password" class="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono" />
+    </label>
+    <label class="block text-sm mt-3">
+      <span class="text-slate-600">Model</span>
+      <select id="modelSel" class="mt-1 w-full border border-slate-300 rounded-md px-3 py-2 text-sm">
+        <option value="claude-sonnet-4-5-20250929">claude-sonnet-4-5 (recommended)</option>
+        <option value="claude-opus-4-5-20250929">claude-opus-4-5 (best accuracy)</option>
+        <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (cheapest/fastest)</option>
+      </select>
+    </label>
+    <p class="text-xs text-slate-500 mt-3">The API key lives on the server and is never sent to your browser.</p>
+    <div class="mt-5 flex justify-end gap-2">
+      <button class="closeModal px-3 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-md">Cancel</button>
+      <button id="saveSettings" class="px-3 py-2 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Masters modal -->
+<div id="mastersModal" class="fixed inset-0 bg-black/40 hidden items-center justify-center z-50 p-4">
+  <div class="bg-white rounded-xl max-w-3xl w-full p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="font-semibold">Master Lists</h3>
+      <button class="closeModal text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
+    </div>
+    <div class="flex gap-2 mb-3">
+      <button class="tab-btn px-3 py-1.5 text-sm rounded-md bg-slate-100" data-tab="drugs" aria-selected="true">Drugs</button>
+      <button class="tab-btn px-3 py-1.5 text-sm rounded-md bg-slate-100" data-tab="vendors" aria-selected="false">Vendors</button>
+    </div>
+
+    <div id="tab-drugs" class="tab">
+      <p class="text-xs text-slate-500 mb-2">One drug name per line. Matching is case-insensitive and fuzzy.</p>
+      <textarea id="drugsList" class="w-full h-64 border border-slate-300 rounded-md p-3 text-sm font-mono" placeholder="Paracetamol 500mg&#10;Azithromycin 250mg&#10;..."></textarea>
+      <div class="mt-2 flex gap-2">
+        <label class="px-3 py-1.5 text-xs bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer">
+          Import CSV
+          <input id="drugsCsv" type="file" accept=".csv,.txt" class="hidden" />
+        </label>
+        <span id="drugsCount" class="text-xs text-slate-500 self-center"></span>
+      </div>
+    </div>
+
+    <div id="tab-vendors" class="tab hidden">
+      <p class="text-xs text-slate-500 mb-2">Format per line: <code class="bg-slate-100 px-1 rounded">VendorCode, Vendor Name</code></p>
+      <textarea id="vendorsList" class="w-full h-64 border border-slate-300 rounded-md p-3 text-sm font-mono" placeholder="V001, ABC Pharma Distributors Pvt Ltd&#10;V002, XYZ Healthcare&#10;..."></textarea>
+      <div class="mt-2 flex gap-2">
+        <label class="px-3 py-1.5 text-xs bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer">
+          Import CSV
+          <input id="vendorsCsv" type="file" accept=".csv,.txt" class="hidden" />
+        </label>
+        <span id="vendorsCount" class="text-xs text-slate-500 self-center"></span>
+      </div>
+    </div>
+
+    <div class="mt-5 flex justify-end gap-2">
+      <button class="closeModal px-3 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-md">Cancel</button>
+      <button id="saveMasters" class="px-3 py-2 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700">Save lists</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   Pharma Bill Extractor — client
+   Calls /api/extract on your Vercel backend.
+   API key lives on the server as ANTHROPIC_API_KEY.
+   Team password lives on the server as TEAM_PASSWORD.
+   ============================================================ */
+
+const LS = {
+  teamPwd: 'pbx.teamPwd',
+  model:   'pbx.model',
+  drugs:   'pbx.drugs',
+  vendors: 'pbx.vendors',
+};
+
+let state = { file: null, fileKind: null, rows: [] };
+
+const $  = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+function normalize(s){ return (s||'').toString().toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+function loadMasters(){
+  const drugs = (localStorage.getItem(LS.drugs)||'').split('\n').map(x=>x.trim()).filter(Boolean);
+  const vendorsRaw = (localStorage.getItem(LS.vendors)||'').split('\n').map(x=>x.trim()).filter(Boolean);
+  const vendors = vendorsRaw.map(line => {
+    const [code, ...rest] = line.split(',');
+    return { code:(code||'').trim(), name: rest.join(',').trim() };
+  }).filter(v => v.code && v.name);
+  return { drugs, vendors };
+}
+function matchDrug(extracted, drugs){
+  const n = normalize(extracted); if(!n) return null;
+  let hit = drugs.find(d => normalize(d) === n);
+  if (hit) return hit;
+  hit = drugs.find(d => { const nd = normalize(d); return nd && (n.includes(nd) || nd.includes(n)); });
+  return hit || null;
+}
+function matchVendor(extracted, vendors){
+  const n = normalize(extracted); if(!n) return null;
+  let hit = vendors.find(v => normalize(v.name) === n);
+  if (hit) return hit;
+  hit = vendors.find(v => { const nn = normalize(v.name); return nn && (n.includes(nn) || nn.includes(n)); });
+  return hit || null;
+}
+function todayDDMMYYYY(){ const d=new Date(), p=n=>String(n).padStart(2,'0'); return `${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()}`; }
+function normalizeDate(s){
+  if(!s) return ''; s = s.toString().trim();
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m){ let [_,d,mo,y]=m; if(y.length===2) y=(parseInt(y)>50?'19':'20')+y; return `${d.padStart(2,'0')}/${mo.padStart(2,'0')}/${y}`; }
+  m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+  if (m){ let [_,y,mo,d]=m; return `${d.padStart(2,'0')}/${mo.padStart(2,'0')}/${y}`; }
+  m = s.match(/^(\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m){ let [_,mo,y]=m; if(y.length===2) y='20'+y;
+    const dayLast = new Date(parseInt(y), parseInt(mo), 0).getDate();
+    return `${String(dayLast).padStart(2,'0')}/${mo.padStart(2,'0')}/${y}`; }
+  return s;
+}
+
+/* ---------- gate ---------- */
+async function testPassword(pwd){
+  // ping the backend with an invalid body — we only care about auth status
+  try{
+    const r = await fetch('/api/extract', {
+      method: 'POST',
+      headers: { 'content-type':'application/json', 'x-team-password': pwd },
+      body: JSON.stringify({ ping: true }),
+    });
+    if (r.status === 401) return false;
+    return true; // any other status (including 400/500 from invalid body) means auth passed or not required
+  } catch(e){ return false; }
+}
+async function requireGate(){
+  const saved = localStorage.getItem(LS.teamPwd) || '';
+  if (saved && await testPassword(saved)) return;
+  // show gate
+  $('#gate').classList.remove('hidden');
+  $('#gateBtn').onclick = async () => {
+    const pwd = $('#gatePwd').value;
+    $('#gateErr').classList.add('hidden');
+    if (!(await testPassword(pwd))) { $('#gateErr').classList.remove('hidden'); return; }
+    localStorage.setItem(LS.teamPwd, pwd);
+    $('#gate').classList.add('hidden');
+  };
+  $('#gatePwd').addEventListener('keydown', e => { if (e.key==='Enter') $('#gateBtn').click(); });
+}
+requireGate();
+
+/* ---------- modals ---------- */
+function openModal(id){ $('#'+id).classList.remove('hidden'); $('#'+id).classList.add('flex'); }
+function closeModal(el){ const m = el.closest('[id$="Modal"]'); m.classList.add('hidden'); m.classList.remove('flex'); }
+
+$('#btnSettings').onclick = () => {
+  $('#teamPwd').value = localStorage.getItem(LS.teamPwd)||'';
+  $('#modelSel').value = localStorage.getItem(LS.model) || 'claude-sonnet-4-5-20250929';
+  openModal('settingsModal');
+};
+$('#saveSettings').onclick = () => {
+  localStorage.setItem(LS.teamPwd, $('#teamPwd').value.trim());
+  localStorage.setItem(LS.model, $('#modelSel').value);
+  closeModal($('#saveSettings'));
+};
+$('#btnMasters').onclick = () => {
+  $('#drugsList').value = localStorage.getItem(LS.drugs) || '';
+  $('#vendorsList').value = localStorage.getItem(LS.vendors) || '';
+  updateMasterCounts();
+  openModal('mastersModal');
+};
+$('#saveMasters').onclick = () => {
+  localStorage.setItem(LS.drugs, $('#drugsList').value);
+  localStorage.setItem(LS.vendors, $('#vendorsList').value);
+  closeModal($('#saveMasters'));
+};
+$$('.closeModal').forEach(b => b.onclick = () => closeModal(b));
+$$('.tab-btn').forEach(b => { b.onclick = () => {
+  $$('.tab-btn').forEach(x => x.setAttribute('aria-selected', x===b?'true':'false'));
+  $$('.tab').forEach(x => x.classList.add('hidden'));
+  $('#tab-'+b.dataset.tab).classList.remove('hidden');
+};});
+$('#drugsList').oninput = updateMasterCounts;
+$('#vendorsList').oninput = updateMasterCounts;
+function updateMasterCounts(){
+  const d = $('#drugsList').value.split('\n').filter(x=>x.trim()).length;
+  const v = $('#vendorsList').value.split('\n').filter(x=>x.trim()).length;
+  $('#drugsCount').textContent = d + ' drugs';
+  $('#vendorsCount').textContent = v + ' vendors';
+}
+$('#drugsCsv').onchange = (e) => { const f=e.target.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{$('#drugsList').value=r.result; updateMasterCounts();}; r.readAsText(f); };
+$('#vendorsCsv').onchange = (e) => {
+  const f=e.target.files[0]; if(!f) return; const r=new FileReader();
+  r.onload=()=>{
+    const lines = r.result.split('\n').map(l=>l.trim()).filter(Boolean);
+    const fmt = lines.map(l => {
+      const parts = l.split(',').map(p=>p.trim());
+      if (parts.length < 2) return l;
+      if (parts[0].length <= 8 && !/\s/.test(parts[0])) return `${parts[0]}, ${parts.slice(1).join(', ')}`;
+      return `${parts[parts.length-1]}, ${parts.slice(0,-1).join(', ')}`;
+    });
+    $('#vendorsList').value = fmt.join('\n'); updateMasterCounts();
+  };
+  r.readAsText(f);
+};
+
+/* ---------- file upload ---------- */
+$('#btnBrowse').onclick = () => $('#fileInput').click();
+$('#fileInput').onchange = (e) => handleFile(e.target.files[0]);
+const drop = $('#drop');
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('border-indigo-500'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('border-indigo-500'); }));
+drop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+
+function handleFile(f){
+  if (!f) return;
+  state.file = f;
+  const ext = f.name.toLowerCase().split('.').pop();
+  if (ext === 'pdf') state.fileKind = 'pdf';
+  else if (['png','jpg','jpeg','webp'].includes(ext)) state.fileKind = 'image';
+  else if (['xlsx','xls'].includes(ext)) state.fileKind = 'excel';
+  else if (ext === 'csv') state.fileKind = 'csv';
+  else state.fileKind = null;
+  $('#fileInfo').classList.remove('hidden');
+  $('#fileInfo').innerHTML = `<span class="chip bg-indigo-100 text-indigo-700">${state.fileKind||'unknown'}</span> <span class="ml-2">${f.name}</span> <span class="text-slate-400 ml-2">${(f.size/1024).toFixed(1)} KB</span>`;
+  $('#btnExtract').disabled = !state.fileKind;
+}
+
+/* ---------- extraction ---------- */
+const EXTRACTION_PROMPT = `You are an assistant that extracts line items from a pharmacy/pharma purchase bill/invoice.
+Return STRICT JSON only (no prose, no markdown). The JSON must have this exact shape:
+
+{
+  "vendor_name": "<seller/supplier name from top of bill>",
+  "purchase_date": "<bill/invoice date, prefer dd/MM/yyyy>",
+  "invoice_number": "<invoice/bill number as printed on the bill>",
+  "items": [
+    {
+      "name": "<product/drug name as printed, including strength if shown>",
+      "type": "<tablet|capsule|syrup|injection|ointment|drops|powder|cream|other — infer from product name/pack>",
+      "packing": "<number of units per pack/sheet/strip, e.g. 10, 15, 30, 100; number only if possible, else keep original text>",
+      "quantity": "<number of packs/strips/bottles purchased — numeric>",
+      "purchase_price": "<purchase/rate price PER PACK (not per unit). Numeric.>",
+      "gst_percent": "<GST % applied to this line, numeric like 5, 12, 18. If IGST+CGST shown, use total.>",
+      "mrp": "<MRP per pack INCLUSIVE of all taxes. Numeric.>",
+      "batch_number": "<batch / lot number exactly as printed>",
+      "expiry_date": "<expiry in dd/MM/yyyy. If only MM/YYYY printed, use last day of that month.>"
+    }
+  ]
+}
+
+Rules:
+- Use "" (empty string) for any field you cannot find. Do not guess.
+- Numbers should be plain numeric strings without currency symbols or commas.
+- Packing: if bill shows "10x10" or "Strip of 10", return "10".
+- Quantity: the number of PACKS bought (not total tablets).
+- Output JSON only.`;
+
+async function callBackend(contentBlocks){
+  const pwd = localStorage.getItem(LS.teamPwd) || '';
+  const model = localStorage.getItem(LS.model) || 'claude-sonnet-4-5-20250929';
+  const res = await fetch('/api/extract', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-team-password': pwd },
+    body: JSON.stringify({ model, max_tokens: 4096, messages: [{ role: 'user', content: contentBlocks }] }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    if (res.status === 401) { localStorage.removeItem(LS.teamPwd); location.reload(); }
+    throw new Error(`Backend error ${res.status}: ${t}`);
+  }
+  const data = await res.json();
+  return (data.content || []).map(b => b.text || '').join('\n');
+}
+
+function fileToBase64(f){ return new Promise((resolve,reject)=>{ const r=new FileReader(); r.onload=()=>resolve(r.result.split(',')[1]); r.onerror=reject; r.readAsDataURL(f); }); }
+async function excelToText(f){
+  const buf = await f.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  let out = '';
+  wb.SheetNames.forEach(name => { const sh = wb.Sheets[name]; out += `\n# Sheet: ${name}\n`; out += XLSX.utils.sheet_to_csv(sh) + '\n'; });
+  return out;
+}
+
+$('#btnExtract').onclick = async () => {
+  try {
+    $('#btnExtract').disabled = true;
+    $('#status').innerHTML = '<span class="spin"></span>Preparing file...';
+    let blocks = [];
+    if (state.fileKind === 'pdf') {
+      const b64 = await fileToBase64(state.file);
+      blocks = [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+        { type: 'text', text: EXTRACTION_PROMPT },
+      ];
+    } else if (state.fileKind === 'image') {
+      const b64 = await fileToBase64(state.file);
+      const mt = state.file.type || 'image/png';
+      blocks = [
+        { type: 'image', source: { type: 'base64', media_type: mt, data: b64 } },
+        { type: 'text', text: EXTRACTION_PROMPT },
+      ];
+    } else if (state.fileKind === 'excel' || state.fileKind === 'csv') {
+      const text = state.fileKind === 'csv' ? await state.file.text() : await excelToText(state.file);
+      blocks = [{ type: 'text', text: EXTRACTION_PROMPT + '\n\nBill contents (spreadsheet):\n```\n' + text + '\n```' }];
+    } else { throw new Error('Unsupported file type.'); }
+
+    $('#status').innerHTML = '<span class="spin"></span>Extracting line items...';
+    const raw = await callBackend(blocks);
+    const json = parseJsonLoose(raw);
+    if (!json || !Array.isArray(json.items)) throw new Error('Could not parse JSON from model response.');
+
+    $('#billInvoiceNumber').value = json.invoice_number || '';
+    $('#billVendorName').value = json.vendor_name || '';
+    $('#billPurchaseDate').value = normalizeDate(json.purchase_date || todayDDMMYYYY());
+    resolveVendor();
+
+    state.rows = json.items.map(it => ({
+      name: it.name||'', type: it.type||'', packing: it.packing||'',
+      quantity: it.quantity||'', purchase_price: it.purchase_price||'',
+      gst_percent: it.gst_percent||'', mrp: it.mrp||'',
+      batch_number: it.batch_number||'',
+      expiry_date: normalizeDate(it.expiry_date||''),
+    }));
+    renderRows();
+    $('#billMetaSec').classList.remove('hidden');
+    $('#reviewSec').classList.remove('hidden');
+    $('#status').textContent = `Extracted ${state.rows.length} line items. Review and edit below.`;
+  } catch(e){
+    console.error(e);
+    $('#status').innerHTML = `<span class="text-rose-600">Error: ${e.message}</span>`;
+  } finally { $('#btnExtract').disabled = false; }
+};
+function parseJsonLoose(s){
+  if(!s) return null; s = s.trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/); if (fence) s = fence[1];
+  const a = s.indexOf('{'), b = s.lastIndexOf('}'); if (a===-1||b===-1) return null;
+  try { return JSON.parse(s.slice(a, b+1)); } catch { return null; }
+}
+
+/* ---------- vendor resolution ---------- */
+$('#billVendorName').oninput = resolveVendor;
+function resolveVendor(){
+  const { vendors } = loadMasters();
+  const name = $('#billVendorName').value.trim();
+  const hit = matchVendor(name, vendors);
+  if (hit) { $('#billVendorCode').value = hit.code; $('#vendorStatus').innerHTML = `<span class="text-emerald-700">✓ matched: ${hit.name}</span>`; }
+  else if (name) { $('#billVendorCode').value = ''; $('#vendorStatus').innerHTML = `<span class="text-amber-700">⚠ new vendor — assign a code, then click "+ Save new"</span>`; }
+  else { $('#billVendorCode').value = ''; $('#vendorStatus').textContent = ''; }
+  renderRows();
+}
+$('#btnAddVendor').onclick = () => {
+  const code = $('#billVendorCode').value.trim();
+  const name = $('#billVendorName').value.trim();
+  if (!code || !name){ alert('Enter both Vendor Code and Vendor Name.'); return; }
+  const cur = localStorage.getItem(LS.vendors) || '';
+  const line = `${code}, ${name}`;
+  const next = cur.trim() ? cur.trim() + '\n' + line : line;
+  localStorage.setItem(LS.vendors, next);
+  resolveVendor();
+  $('#vendorStatus').innerHTML = `<span class="text-emerald-700">✓ saved — ${code} → ${name}</span>`;
+};
+
+/* ---------- rows rendering ---------- */
+function renderRows(){
+  const { drugs } = loadMasters();
+  const code = $('#billVendorCode').value.trim() || 'VXX';
+  const tbody = $('#rows'); tbody.innerHTML = '';
+  state.rows.forEach((r, i) => {
+    const tr = document.createElement('tr'); tr.className = 'border-b border-slate-100';
+    const matched = matchDrug(r.name, drugs);
+    if (matched) tr.classList.add('matched-row'); else tr.classList.add('new-vendor-row');
+    tr.innerHTML = `
+      <td class="px-2 py-1 text-center text-slate-400"><button class="delRow hover:text-rose-600" data-i="${i}">✕</button></td>
+      <td class="px-2 py-1" title="${matched ? 'matched master: '+matched : 'no master match'}">
+        <input data-f="name" data-i="${i}" value="${escapeHtml(r.name)}" />
+        <div class="text-[10px] ${matched?'text-emerald-700':'text-amber-700'} px-2 pb-1">
+          ${matched ? '→ master: '+matched : `→ will export as: <b>${escapeHtml(code)} - ${escapeHtml(r.name||'')} - ${escapeHtml(r.batch_number||'')}</b>`}
+        </div>
+      </td>
+      <td class="px-2 py-1"><input data-f="type" data-i="${i}" value="${escapeHtml(r.type)}" /></td>
+      <td class="px-2 py-1"><input data-f="packing" data-i="${i}" value="${escapeHtml(r.packing)}" /></td>
+      <td class="px-2 py-1"><input data-f="quantity" data-i="${i}" value="${escapeHtml(r.quantity)}" /></td>
+      <td class="px-2 py-1"><input data-f="purchase_price" data-i="${i}" value="${escapeHtml(r.purchase_price)}" /></td>
+      <td class="px-2 py-1"><input data-f="gst_percent" data-i="${i}" value="${escapeHtml(r.gst_percent)}" /></td>
+      <td class="px-2 py-1"><input data-f="mrp" data-i="${i}" value="${escapeHtml(r.mrp)}" /></td>
+      <td class="px-2 py-1"><input data-f="batch_number" data-i="${i}" value="${escapeHtml(r.batch_number)}" /></td>
+      <td class="px-2 py-1"><input data-f="expiry_date" data-i="${i}" value="${escapeHtml(r.expiry_date)}" /></td>`;
+    tbody.appendChild(tr);
+  });
+  tbody.querySelectorAll('input').forEach(inp => {
+    inp.oninput = (e) => { const i=+e.target.dataset.i, f=e.target.dataset.f; state.rows[i][f] = e.target.value; if (f==='name'||f==='batch_number') scheduleHintRerender(); };
+    inp.onblur = (e) => { if (e.target.dataset.f === 'expiry_date') { state.rows[+e.target.dataset.i].expiry_date = normalizeDate(e.target.value); renderRows(); } };
+  });
+  tbody.querySelectorAll('.delRow').forEach(b => b.onclick = () => { state.rows.splice(+b.dataset.i, 1); renderRows(); });
+}
+let _hintTimer; function scheduleHintRerender(){ clearTimeout(_hintTimer); _hintTimer=setTimeout(renderRows, 400); }
+function escapeHtml(s){ return (s==null?'':String(s)).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+$('#btnAddRow').onclick = () => { state.rows.push({name:'',type:'',packing:'',quantity:'',purchase_price:'',gst_percent:'',mrp:'',batch_number:'',expiry_date:''}); renderRows(); };
+
+/* ---------- CSV download ---------- */
+$('#btnDownload').onclick = () => {
+  const { drugs } = loadMasters();
+  const invoiceNumber = $('#billInvoiceNumber').value.trim();
+  const vendorCode = $('#billVendorCode').value.trim() || 'VXX';
+  const vendorName = $('#billVendorName').value.trim();
+  const purchaseDate = normalizeDate($('#billPurchaseDate').value.trim() || todayDDMMYYYY());
+  if (!vendorName){ alert('Please enter the Vendor Name in Bill details.'); return; }
+  if (!invoiceNumber) { if (!confirm('Invoice Number is empty. Export anyway?')) return; }
+  if (!vendorCode || vendorCode === 'VXX') { if (!confirm('Vendor code is not set. Export anyway? (Names will use "VXX" as vendor code prefix.)')) return; }
+
+  const header = ['Invoice Number','Name','Type','Packing','Quantity','Purchase Price','GST %','MRP','Batch Number','Purchase Date','Expiry Date','Vendor Name'];
+  const rows = state.rows.map(r => {
+    const matched = matchDrug(r.name, drugs);
+    const finalName = matched ? matched : `${vendorCode} - ${r.name||''} - ${r.batch_number||''}`;
+    return [invoiceNumber, finalName, r.type||'', r.packing||'', r.quantity||'', r.purchase_price||'', r.gst_percent||'', r.mrp||'', r.batch_number||'', purchaseDate, normalizeDate(r.expiry_date||''), vendorName];
+  });
+  const csv = [header, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  const tag = (invoiceNumber || vendorName || 'bill').replace(/[^a-z0-9]+/gi,'_').toLowerCase();
+  a.download = `pharma_bill_${tag}_${purchaseDate.replace(/\//g,'-')}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+};
+function csvCell(v){ const s=(v==null?'':String(v)); if (/[",\r\n]/.test(s)) return '"'+s.replace(/"/g,'""')+'"'; return s; }
+</script>
+</body>
+</html>
