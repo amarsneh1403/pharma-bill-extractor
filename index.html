@@ -160,7 +160,10 @@
 <div id="mastersModal" class="fixed inset-0 bg-black/40 hidden items-center justify-center z-50 p-4">
   <div class="bg-white rounded-xl max-w-3xl w-full p-6">
     <div class="flex items-center justify-between mb-4">
-      <h3 class="font-semibold">Master Lists</h3>
+      <div>
+        <h3 class="font-semibold">Master Lists</h3>
+        <p id="mastersUpdatedAt" class="text-xs text-slate-500"></p>
+      </div>
       <button class="closeModal text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
     </div>
     <div class="flex gap-2 mb-3">
@@ -210,9 +213,8 @@
 const LS = {
   teamPwd: 'pbx.teamPwd',
   model:   'pbx.model',
-  drugs:   'pbx.drugs',
-  vendors: 'pbx.vendors',
 };
+const MASTERS = { drugs: [], vendors: [], drugsRaw: '', vendorsRaw: '', updatedAt: null, loaded: false };
 
 let state = { file: null, fileKind: null, rows: [] };
 
@@ -220,15 +222,33 @@ const $  = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
 
 function normalize(s){ return (s||'').toString().toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
-function loadMasters(){
-  const drugs = (localStorage.getItem(LS.drugs)||'').split('\n').map(x=>x.trim()).filter(Boolean);
-  const vendorsRaw = (localStorage.getItem(LS.vendors)||'').split('\n').map(x=>x.trim()).filter(Boolean);
-  const vendors = vendorsRaw.map(line => {
+async function loadMastersFromServer(){
+  const pwd = localStorage.getItem(LS.teamPwd) || '';
+  const r = await fetch('/api/masters', { headers: { 'x-team-password': pwd } });
+  if (!r.ok) { const t = await r.text().catch(()=>String(r.status)); throw new Error(t); }
+  const data = await r.json();
+  MASTERS.drugsRaw = data.drugs || '';
+  MASTERS.vendorsRaw = data.vendors || '';
+  MASTERS.drugs = MASTERS.drugsRaw.split('\n').map(x=>x.trim()).filter(Boolean);
+  const vraw = MASTERS.vendorsRaw.split('\n').map(x=>x.trim()).filter(Boolean);
+  MASTERS.vendors = vraw.map(line => {
     const [code, ...rest] = line.split(',');
     return { code:(code||'').trim(), name: rest.join(',').trim() };
   }).filter(v => v.code && v.name);
-  return { drugs, vendors };
+  MASTERS.updatedAt = data.updatedAt || null;
+  MASTERS.loaded = true;
 }
+async function saveMastersToServer(drugsText, vendorsText){
+  const pwd = localStorage.getItem(LS.teamPwd) || '';
+  const r = await fetch('/api/masters', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-team-password': pwd },
+    body: JSON.stringify({ drugs: drugsText, vendors: vendorsText }),
+  });
+  if (!r.ok) { const t = await r.text().catch(()=>String(r.status)); throw new Error(t); }
+  await loadMastersFromServer();
+}
+function loadMasters(){ return { drugs: MASTERS.drugs, vendors: MASTERS.vendors }; }
 function matchDrug(extracted, drugs){
   const n = normalize(extracted); if(!n) return null;
   let hit = drugs.find(d => normalize(d) === n);
@@ -272,7 +292,7 @@ async function testPassword(pwd){
 }
 async function requireGate(){
   const saved = localStorage.getItem(LS.teamPwd) || '';
-  if (saved && await testPassword(saved)) return;
+  if (saved && await testPassword(saved)) { await loadInitialMasters(); return; }
   // show gate
   $('#gate').classList.remove('hidden');
   $('#gateBtn').onclick = async () => {
@@ -281,8 +301,13 @@ async function requireGate(){
     if (!(await testPassword(pwd))) { $('#gateErr').classList.remove('hidden'); return; }
     localStorage.setItem(LS.teamPwd, pwd);
     $('#gate').classList.add('hidden');
+    await loadInitialMasters();
   };
   $('#gatePwd').addEventListener('keydown', e => { if (e.key==='Enter') $('#gateBtn').click(); });
+}
+async function loadInitialMasters(){
+  try { await loadMastersFromServer(); }
+  catch(e){ console.error('Master list load failed:', e); }
 }
 requireGate();
 
@@ -300,16 +325,23 @@ $('#saveSettings').onclick = () => {
   localStorage.setItem(LS.model, $('#modelSel').value);
   closeModal($('#saveSettings'));
 };
-$('#btnMasters').onclick = () => {
-  $('#drugsList').value = localStorage.getItem(LS.drugs) || '';
-  $('#vendorsList').value = localStorage.getItem(LS.vendors) || '';
+$('#btnMasters').onclick = async () => {
+  try { await loadMastersFromServer(); }
+  catch(e){ alert('Could not load team master lists: ' + e.message); return; }
+  $('#drugsList').value = MASTERS.drugsRaw;
+  $('#vendorsList').value = MASTERS.vendorsRaw;
   updateMasterCounts();
+  const el = document.getElementById('mastersUpdatedAt');
+  if (el) el.textContent = MASTERS.updatedAt ? ('Team list · last updated ' + new Date(MASTERS.updatedAt).toLocaleString()) : 'Team list · empty';
   openModal('mastersModal');
 };
-$('#saveMasters').onclick = () => {
-  localStorage.setItem(LS.drugs, $('#drugsList').value);
-  localStorage.setItem(LS.vendors, $('#vendorsList').value);
-  closeModal($('#saveMasters'));
+$('#saveMasters').onclick = async () => {
+  const btn = $('#saveMasters'); const original = btn.textContent; btn.disabled = true; btn.textContent = 'Saving...';
+  try {
+    await saveMastersToServer($('#drugsList').value, $('#vendorsList').value);
+    closeModal(btn);
+  } catch(e){ alert('Failed to save team lists: ' + e.message); }
+  finally { btn.disabled = false; btn.textContent = original; }
 };
 $$('.closeModal').forEach(b => b.onclick = () => closeModal(b));
 $$('.tab-btn').forEach(b => { b.onclick = () => {
@@ -486,16 +518,20 @@ function resolveVendor(){
   else { $('#billVendorCode').value = ''; $('#vendorStatus').textContent = ''; }
   renderRows();
 }
-$('#btnAddVendor').onclick = () => {
+$('#btnAddVendor').onclick = async () => {
   const code = $('#billVendorCode').value.trim();
   const name = $('#billVendorName').value.trim();
   if (!code || !name){ alert('Enter both Vendor Code and Vendor Name.'); return; }
-  const cur = localStorage.getItem(LS.vendors) || '';
+  const cur = MASTERS.vendorsRaw || '';
   const line = `${code}, ${name}`;
   const next = cur.trim() ? cur.trim() + '\n' + line : line;
-  localStorage.setItem(LS.vendors, next);
-  resolveVendor();
-  $('#vendorStatus').innerHTML = `<span class="text-emerald-700">✓ saved — ${code} → ${name}</span>`;
+  const btn = $('#btnAddVendor'); btn.disabled = true; const original = btn.textContent; btn.textContent = 'Saving...';
+  try {
+    await saveMastersToServer(MASTERS.drugsRaw, next);
+    resolveVendor();
+    $('#vendorStatus').innerHTML = `<span class="text-emerald-700">✓ saved to team list — ${code} → ${name}</span>`;
+  } catch(e){ alert('Failed to save: ' + e.message); }
+  finally { btn.disabled = false; btn.textContent = original; }
 };
 
 /* ---------- rows rendering ---------- */

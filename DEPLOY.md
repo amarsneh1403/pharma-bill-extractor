@@ -45,6 +45,18 @@ Your code is now on GitHub.
 5. Click **Deploy**. Wait ~30 seconds.
 6. When it's done, Vercel gives you a URL like `pharma-bill-extractor-xyz.vercel.app`. That's your tool.
 
+## Stage 3.5 — Add shared storage for master lists (one-time)
+
+Without this step, every team member has their own empty drug/vendor list. This connects a small free database so everyone shares the same lists.
+
+1. In your Vercel project dashboard, left sidebar → **Storage**.
+2. Click **Create Database** → pick **Upstash for Redis** (free tier).
+3. Give it any name (e.g. `pharma-masters`). Pick any region close to you. Click **Create**.
+4. On the database page, click **Connect Project** → pick `pharma-bill-extractor` → Connect.
+5. Vercel auto-adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` as environment variables on your project — no action needed from you.
+6. Go to **Deployments** → click the "…" on the latest deployment → **Redeploy** (so the new env vars take effect).
+7. Wait 30 seconds for the redeploy. Now when anyone opens **📚 Master Lists**, they see the shared team list. Saves sync to everyone.
+
 ## Stage 4 — Share with your team
 
 Send your team:
